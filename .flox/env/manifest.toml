@@ -1,0 +1,210 @@
+# ComfyUI Package Builder - Build and publish ComfyUI as a Flox package
+version = 1
+
+[install]
+# Python and package management
+python3.pkg-path = "python312"
+uv.pkg-path = "uv"
+
+# Build dependencies
+gcc-unwrapped.pkg-path = "gcc-unwrapped"
+gcc-unwrapped.priority = 5
+gcc-unwrapped.pkg-group = "libraries"
+
+# Git for version info
+git.pkg-path = "git"
+
+# Tools for downloading models
+wget.pkg-path = "wget"
+curl.pkg-path = "curl"
+
+# Build tools
+gnumake.pkg-path = "gnumake"
+coreutils.pkg-path = "coreutils"
+
+
+[vars]
+# Build configuration
+COMFYUI_VERSION = "0.3.52"
+
+
+[hook]
+on-activate = '''
+set -euo pipefail
+
+# Create build directories if running interactively
+if [ -n "${FLOX_ENV_CACHE:-}" ]; then
+  mkdir -p "$FLOX_ENV_CACHE"/{build,dist,logs}
+  
+  # Setup Python virtual environment for development
+  venv="$FLOX_ENV_CACHE/venv"
+  if [ ! -d "$venv" ]; then
+    echo "Setting up Python development environment..."
+    uv venv "$venv" --python python3
+  fi
+  
+  # Install build dependencies if needed
+  if [ -f "$venv/bin/activate" ] && [ ! -f "$FLOX_ENV_CACHE/.build_deps_installed" ]; then
+    source "$venv/bin/activate"
+    echo "Installing build dependencies..."
+    uv pip install --python "$venv/bin/python" build setuptools wheel
+    touch "$FLOX_ENV_CACHE/.build_deps_installed"
+  fi
+fi
+
+if [ -n "${FLOX_ENV_PROJECT:-}" ]; then
+  cd "$FLOX_ENV_PROJECT"
+fi
+'''
+
+
+[profile]
+common = '''
+# Helper functions for package development
+comfyui_version() {
+  if [ -f "$FLOX_ENV_PROJECT/.git/HEAD" ]; then
+    git describe --tags --always 2>/dev/null || echo "$COMFYUI_VERSION"
+  else
+    echo "$COMFYUI_VERSION"
+  fi
+}
+
+test_build() {
+  echo "Testing ComfyUI build..."
+  flox build comfyui
+  if [ -L "result-comfyui" ]; then
+    echo "✓ Build successful!"
+    echo "Test the package with: ./result-comfyui/bin/comfyui --help"
+  else
+    echo "✗ Build failed"
+  fi
+}
+
+publish_package() {
+  echo "Publishing ComfyUI package..."
+  echo "Ensure you're logged in: flox auth login"
+  echo "Then run: flox publish comfyui"
+}
+'''
+
+
+## Services ---------------------------------------------------------
+##  $ flox services start             <- Starts all services
+##  $ flox services status            <- Status of running services
+##  $ flox activate --start-services  <- Activates & starts all
+## ------------------------------------------------------------------
+[services]
+# myservice.command = "python3 -m http.server"
+
+
+## Include ----------------------------------------------------------
+## ... environments to create a composed environment
+## ------------------------------------------------------------------
+[include]
+# environments = [
+#     { dir = "../common" }
+# ]
+
+
+[build]
+# Main ComfyUI package build
+comfyui.description = "Powerful and modular visual AI engine with node-based interface"
+comfyui.version = "0.3.52"
+# Note: Users need to install Python dependencies separately
+# This package provides the ComfyUI source and wrapper scripts
+# Runtime dependencies: python3, torch, torchvision, torchaudio, and requirements.txt packages
+comfyui.runtime-packages = ["python3", "wget", "curl"]
+comfyui.command = '''
+set -euo pipefail
+
+echo "Building ComfyUI package..."
+
+# Create output directories
+mkdir -p "$out"/{bin,lib/python3.12/site-packages,share/comfyui}
+
+# Copy ComfyUI source code
+echo "Copying ComfyUI source..."
+cp -r . "$out/share/comfyui/"
+
+# Remove unnecessary files
+rm -rf "$out/share/comfyui"/{.git,.github,.flox,tests,tests-unit}
+
+# Create a wrapper script that sets up the environment
+cat > "$out/bin/comfyui" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Find the ComfyUI installation
+COMFYUI_ROOT="$(dirname "$(dirname "$(readlink -f "$0")")")/share/comfyui"
+
+# Set up Python path
+export PYTHONPATH="$COMFYUI_ROOT:$PYTHONPATH"
+
+# Default directories
+export COMFYUI_MODELS_DIR="${COMFYUI_MODELS_DIR:-$HOME/.comfyui/models}"
+export COMFYUI_OUTPUT_DIR="${COMFYUI_OUTPUT_DIR:-$HOME/.comfyui/output}"
+export COMFYUI_INPUT_DIR="${COMFYUI_INPUT_DIR:-$HOME/.comfyui/input}"
+
+# Create directories if they don't exist
+mkdir -p "$COMFYUI_MODELS_DIR"/{checkpoints,vae,loras,controlnet,clip,embeddings}
+mkdir -p "$COMFYUI_OUTPUT_DIR" "$COMFYUI_INPUT_DIR"
+
+# Change to ComfyUI directory for execution
+cd "$COMFYUI_ROOT"
+
+# Execute ComfyUI with Python
+exec python3 "$COMFYUI_ROOT/main.py" \
+  --output-directory "$COMFYUI_OUTPUT_DIR" \
+  --input-directory "$COMFYUI_INPUT_DIR" \
+  "$@"
+EOF
+
+chmod +x "$out/bin/comfyui"
+
+# Create a server wrapper for convenience
+cat > "$out/bin/comfyui-server" << 'EOF'
+#!/usr/bin/env bash
+exec comfyui --listen 0.0.0.0 --port "${COMFYUI_PORT:-8188}" "$@"
+EOF
+
+chmod +x "$out/bin/comfyui-server"
+
+# Create model downloader utility
+cat > "$out/bin/comfyui-download-models" << 'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODELS_DIR="${COMFYUI_MODELS_DIR:-$HOME/.comfyui/models}"
+
+case "${1:-}" in
+  sd15)
+    echo "Downloading Stable Diffusion 1.5..."
+    wget -q --show-progress -O "$MODELS_DIR/checkpoints/v1-5-pruned-emaonly.safetensors" \
+      "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors"
+    echo "✓ Downloaded to $MODELS_DIR/checkpoints/"
+    ;;
+  sdxl)
+    echo "Downloading Stable Diffusion XL..."
+    wget -q --show-progress -O "$MODELS_DIR/checkpoints/sd_xl_base_1.0.safetensors" \
+      "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors"
+    echo "✓ Downloaded to $MODELS_DIR/checkpoints/"
+    ;;
+  *)
+    echo "Usage: comfyui-download-models [sd15|sdxl]"
+    echo ""
+    echo "Available models:"
+    echo "  sd15  - Stable Diffusion 1.5"
+    echo "  sdxl  - Stable Diffusion XL Base"
+    exit 1
+    ;;
+esac
+EOF
+
+chmod +x "$out/bin/comfyui-download-models"
+
+echo "✓ ComfyUI package built successfully"
+'''
+
+
+[options]
+systems = ["x86_64-linux", "aarch64-linux"]

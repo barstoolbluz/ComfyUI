@@ -1,0 +1,564 @@
+{
+  "lockfile-version": 1,
+  "manifest": {
+    "version": 1,
+    "install": {
+      "coreutils": {
+        "pkg-path": "coreutils"
+      },
+      "curl": {
+        "pkg-path": "curl"
+      },
+      "gcc-unwrapped": {
+        "pkg-path": "gcc-unwrapped",
+        "pkg-group": "libraries",
+        "priority": 5
+      },
+      "git": {
+        "pkg-path": "git"
+      },
+      "gnumake": {
+        "pkg-path": "gnumake"
+      },
+      "python3": {
+        "pkg-path": "python312"
+      },
+      "uv": {
+        "pkg-path": "uv"
+      },
+      "wget": {
+        "pkg-path": "wget"
+      }
+    },
+    "vars": {
+      "COMFYUI_VERSION": "0.3.52"
+    },
+    "hook": {
+      "on-activate": "set -euo pipefail\n\n# Create build directories if running interactively\nif [ -n \"${FLOX_ENV_CACHE:-}\" ]; then\n  mkdir -p \"$FLOX_ENV_CACHE\"/{build,dist,logs}\n  \n  # Setup Python virtual environment for development\n  venv=\"$FLOX_ENV_CACHE/venv\"\n  if [ ! -d \"$venv\" ]; then\n    echo \"Setting up Python development environment...\"\n    uv venv \"$venv\" --python python3\n  fi\n  \n  # Install build dependencies if needed\n  if [ -f \"$venv/bin/activate\" ] && [ ! -f \"$FLOX_ENV_CACHE/.build_deps_installed\" ]; then\n    source \"$venv/bin/activate\"\n    echo \"Installing build dependencies...\"\n    uv pip install --python \"$venv/bin/python\" build setuptools wheel\n    touch \"$FLOX_ENV_CACHE/.build_deps_installed\"\n  fi\nfi\n\nif [ -n \"${FLOX_ENV_PROJECT:-}\" ]; then\n  cd \"$FLOX_ENV_PROJECT\"\nfi\n"
+    },
+    "profile": {
+      "common": "# Helper functions for package development\ncomfyui_version() {\n  if [ -f \"$FLOX_ENV_PROJECT/.git/HEAD\" ]; then\n    git describe --tags --always 2>/dev/null || echo \"$COMFYUI_VERSION\"\n  else\n    echo \"$COMFYUI_VERSION\"\n  fi\n}\n\ntest_build() {\n  echo \"Testing ComfyUI build...\"\n  flox build comfyui\n  if [ -L \"result-comfyui\" ]; then\n    echo \"✓ Build successful!\"\n    echo \"Test the package with: ./result-comfyui/bin/comfyui --help\"\n  else\n    echo \"✗ Build failed\"\n  fi\n}\n\npublish_package() {\n  echo \"Publishing ComfyUI package...\"\n  echo \"Ensure you're logged in: flox auth login\"\n  echo \"Then run: flox publish comfyui\"\n}\n"
+    },
+    "options": {
+      "systems": [
+        "x86_64-linux",
+        "aarch64-linux"
+      ]
+    },
+    "build": {
+      "comfyui": {
+        "command": "set -euo pipefail\n\necho \"Building ComfyUI package...\"\n\n# Create output directories\nmkdir -p \"$out\"/{bin,lib/python3.12/site-packages,share/comfyui}\n\n# Copy ComfyUI source code\necho \"Copying ComfyUI source...\"\ncp -r . \"$out/share/comfyui/\"\n\n# Remove unnecessary files\nrm -rf \"$out/share/comfyui\"/{.git,.github,.flox,tests,tests-unit}\n\n# Create a wrapper script that sets up the environment\ncat > \"$out/bin/comfyui\" << 'EOF'\n#!/usr/bin/env bash\nset -euo pipefail\n\n# Find the ComfyUI installation\nCOMFYUI_ROOT=\"$(dirname \"$(dirname \"$(readlink -f \"$0\")\")\")/share/comfyui\"\n\n# Set up Python path\nexport PYTHONPATH=\"$COMFYUI_ROOT:$PYTHONPATH\"\n\n# Default directories\nexport COMFYUI_MODELS_DIR=\"${COMFYUI_MODELS_DIR:-$HOME/.comfyui/models}\"\nexport COMFYUI_OUTPUT_DIR=\"${COMFYUI_OUTPUT_DIR:-$HOME/.comfyui/output}\"\nexport COMFYUI_INPUT_DIR=\"${COMFYUI_INPUT_DIR:-$HOME/.comfyui/input}\"\n\n# Create directories if they don't exist\nmkdir -p \"$COMFYUI_MODELS_DIR\"/{checkpoints,vae,loras,controlnet,clip,embeddings}\nmkdir -p \"$COMFYUI_OUTPUT_DIR\" \"$COMFYUI_INPUT_DIR\"\n\n# Change to ComfyUI directory for execution\ncd \"$COMFYUI_ROOT\"\n\n# Execute ComfyUI with Python\nexec python3 \"$COMFYUI_ROOT/main.py\" \\\n  --output-directory \"$COMFYUI_OUTPUT_DIR\" \\\n  --input-directory \"$COMFYUI_INPUT_DIR\" \\\n  \"$@\"\nEOF\n\nchmod +x \"$out/bin/comfyui\"\n\n# Create a server wrapper for convenience\ncat > \"$out/bin/comfyui-server\" << 'EOF'\n#!/usr/bin/env bash\nexec comfyui --listen 0.0.0.0 --port \"${COMFYUI_PORT:-8188}\" \"$@\"\nEOF\n\nchmod +x \"$out/bin/comfyui-server\"\n\n# Create model downloader utility\ncat > \"$out/bin/comfyui-download-models\" << 'EOF'\n#!/usr/bin/env bash\nset -euo pipefail\n\nMODELS_DIR=\"${COMFYUI_MODELS_DIR:-$HOME/.comfyui/models}\"\n\ncase \"${1:-}\" in\n  sd15)\n    echo \"Downloading Stable Diffusion 1.5...\"\n    wget -q --show-progress -O \"$MODELS_DIR/checkpoints/v1-5-pruned-emaonly.safetensors\" \\\n      \"https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors\"\n    echo \"✓ Downloaded to $MODELS_DIR/checkpoints/\"\n    ;;\n  sdxl)\n    echo \"Downloading Stable Diffusion XL...\"\n    wget -q --show-progress -O \"$MODELS_DIR/checkpoints/sd_xl_base_1.0.safetensors\" \\\n      \"https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors\"\n    echo \"✓ Downloaded to $MODELS_DIR/checkpoints/\"\n    ;;\n  *)\n    echo \"Usage: comfyui-download-models [sd15|sdxl]\"\n    echo \"\"\n    echo \"Available models:\"\n    echo \"  sd15  - Stable Diffusion 1.5\"\n    echo \"  sdxl  - Stable Diffusion XL Base\"\n    exit 1\n    ;;\nesac\nEOF\n\nchmod +x \"$out/bin/comfyui-download-models\"\n\necho \"✓ ComfyUI package built successfully\"\n",
+        "version": "0.3.52",
+        "description": "Powerful and modular visual AI engine with node-based interface"
+      }
+    }
+  },
+  "packages": [
+    {
+      "attr_path": "gcc-unwrapped",
+      "broken": false,
+      "derivation": "/nix/store/y7h8rb53hnf8ynf336f8xhaqsrhjcjnk-gcc-14.3.0.drv",
+      "description": "GNU Compiler Collection, version 14.3.0",
+      "install_id": "gcc-unwrapped",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "gcc-14.3.0",
+      "pname": "gcc-unwrapped",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:05:26.009866Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "14.3.0",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "checksum": "/nix/store/p9m8c0hmsdk3rvgmzn5d9i9a5hzh1d27-gcc-14.3.0-checksum",
+        "info": "/nix/store/1pbc2305k87885765j199k9gckhhrfys-gcc-14.3.0-info",
+        "lib": "/nix/store/p5rikcr7shbhv501w0k0bbp7jr42pdsj-gcc-14.3.0-lib",
+        "libgcc": "/nix/store/w3md1s81ymn6i5mim2w3872qhwi6ys1z-gcc-14.3.0-libgcc",
+        "man": "/nix/store/yfzmjcnb25dw4vzvnh4acwn700d86rr0-gcc-14.3.0-man",
+        "out": "/nix/store/9670z59sn0mvzq7xm72vh6158m7s4v99-gcc-14.3.0"
+      },
+      "system": "aarch64-linux",
+      "group": "libraries",
+      "priority": 5
+    },
+    {
+      "attr_path": "gcc-unwrapped",
+      "broken": false,
+      "derivation": "/nix/store/y0smvghrwqhj8j38l00g1g16dhxcfcvb-gcc-14.3.0.drv",
+      "description": "GNU Compiler Collection, version 14.3.0",
+      "install_id": "gcc-unwrapped",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "gcc-14.3.0",
+      "pname": "gcc-unwrapped",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:57:27.186703Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "14.3.0",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "checksum": "/nix/store/4ncfqiixbvdgr4zapxn9nhy1zyd187vx-gcc-14.3.0-checksum",
+        "info": "/nix/store/i028f0m19scn1id5jwz1rmih08vy4chx-gcc-14.3.0-info",
+        "lib": "/nix/store/fkw48vh7ivlvlmhp4j30hy2gvg00jgin-gcc-14.3.0-lib",
+        "libgcc": "/nix/store/cg41x0ldk43qlsndsbladyl0k4dxanvh-gcc-14.3.0-libgcc",
+        "man": "/nix/store/8xf5hbmjj1387xdjfjg3crawds37089c-gcc-14.3.0-man",
+        "out": "/nix/store/qnwxpk0in4bm43q2qnykvkjxa9qhqd0z-gcc-14.3.0"
+      },
+      "system": "x86_64-linux",
+      "group": "libraries",
+      "priority": 5
+    },
+    {
+      "attr_path": "coreutils",
+      "broken": false,
+      "derivation": "/nix/store/ynxqpqvpn3ajzcdbrddpljhdzz47lrx9-coreutils-9.7.drv",
+      "description": "GNU Core Utilities",
+      "install_id": "coreutils",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "coreutils-9.7",
+      "pname": "coreutils",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:05:25.065991Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "9.7",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/a465x241qnwmk8a7j8sryr3by1w43bry-coreutils-9.7-debug",
+        "info": "/nix/store/j571l41q05v8bzigwj98y5w8qv6y3ib8-coreutils-9.7-info",
+        "out": "/nix/store/8b7y59p9vzlkwbx52q42lzpf9gwkzih2-coreutils-9.7"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "coreutils",
+      "broken": false,
+      "derivation": "/nix/store/m1iqxjf7qjdwzhvwcsmqjzr88vbfnw4c-coreutils-9.7.drv",
+      "description": "GNU Core Utilities",
+      "install_id": "coreutils",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "coreutils-9.7",
+      "pname": "coreutils",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:57:26.083Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "9.7",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/djp1j1sr6znqdyklb60irysmbkr6b51h-coreutils-9.7-debug",
+        "info": "/nix/store/qq91hijdh4gmwrkpx4q9158sk469n12n-coreutils-9.7-info",
+        "out": "/nix/store/ih779chzzag1nm91fgnrndml4mghm3la-coreutils-9.7"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "curl",
+      "broken": false,
+      "derivation": "/nix/store/khbwr26zzkxs82msbvfdx6xc07p11ima-curl-8.14.1.drv",
+      "description": "Command line tool for transferring files with URL syntax",
+      "install_id": "curl",
+      "license": "curl",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "curl-8.14.1",
+      "pname": "curl",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:05:25.162560Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "8.14.1",
+      "outputs_to_install": [
+        "bin",
+        "man"
+      ],
+      "outputs": {
+        "bin": "/nix/store/xjyd8czibdxvwqyh7ybnh300cykzis3g-curl-8.14.1-bin",
+        "debug": "/nix/store/qls3y5lyqnzgqi19w0vhsg7fsw4p7slw-curl-8.14.1-debug",
+        "dev": "/nix/store/fzy5wbav5r78alzhsalh4bnp1wdwsd4h-curl-8.14.1-dev",
+        "devdoc": "/nix/store/j7jilzkvpzg8iz4lhpb0zjnv4gn58n47-curl-8.14.1-devdoc",
+        "man": "/nix/store/h97kdc67n02xx4ij47gh448knfxrxkyr-curl-8.14.1-man",
+        "out": "/nix/store/7zlkjxk4n4n2mch4ssblql8855gqnzqv-curl-8.14.1"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "curl",
+      "broken": false,
+      "derivation": "/nix/store/1ircj3gv1w0mz5q2n7y0bdbcywj4263b-curl-8.14.1.drv",
+      "description": "Command line tool for transferring files with URL syntax",
+      "install_id": "curl",
+      "license": "curl",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "curl-8.14.1",
+      "pname": "curl",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:57:26.214488Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "8.14.1",
+      "outputs_to_install": [
+        "bin",
+        "man"
+      ],
+      "outputs": {
+        "bin": "/nix/store/z1l1b9bdzk6yspdf53z90n2dv311g1r6-curl-8.14.1-bin",
+        "debug": "/nix/store/q116b51lfnj36r2cyfhrjad7lr6kydx8-curl-8.14.1-debug",
+        "dev": "/nix/store/912hlbqiabfk5xy0ajla6z9dwzlwkn87-curl-8.14.1-dev",
+        "devdoc": "/nix/store/lrnviaphs4pf2cy3625d0vp94c4pzbpm-curl-8.14.1-devdoc",
+        "man": "/nix/store/zv6lnrb8hladdc91y0v4mazi0sxwmzq2-curl-8.14.1-man",
+        "out": "/nix/store/95iy4kvy1xllg2fpb14dhw4m3ff3l0f0-curl-8.14.1"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "git",
+      "broken": false,
+      "derivation": "/nix/store/q8hm799dph7mklvjdjzzl0z8xjn3f62s-git-2.50.1.drv",
+      "description": "Distributed version control system",
+      "install_id": "git",
+      "license": "GPL-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "git-2.50.1",
+      "pname": "git",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:05:26.131236Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.50.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/rpxnrnsn4nbx8wm9d2vrgj0fr5xzz5lg-git-2.50.1-debug",
+        "doc": "/nix/store/q8sicpx16gyzxnp3345a46lj4cz9wd09-git-2.50.1-doc",
+        "out": "/nix/store/h4pvvix6pvnvys9a6y1xj2442r1ajdhl-git-2.50.1"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "git",
+      "broken": false,
+      "derivation": "/nix/store/h0jawfyrfcnl8n7lzy8hh5xmc25a1v6d-git-2.50.1.drv",
+      "description": "Distributed version control system",
+      "install_id": "git",
+      "license": "GPL-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "git-2.50.1",
+      "pname": "git",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:57:27.328446Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "2.50.1",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/l46kpjpcwwp8l7kzzr1s2dlk646r73z2-git-2.50.1-debug",
+        "doc": "/nix/store/d2lhlzkdziwmijik8nszfwp8srbkskb9-git-2.50.1-doc",
+        "out": "/nix/store/5i8zvall945kypmwgqd0y47f02pldwp4-git-2.50.1"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "gnumake",
+      "broken": false,
+      "derivation": "/nix/store/8q7z6mjhlx289kxkdjwi6i0j64nzl908-gnumake-4.4.1.drv",
+      "description": "Tool to control the generation of non-source files from sources",
+      "install_id": "gnumake",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "gnumake-4.4.1",
+      "pname": "gnumake",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:05:26.637650Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "4.4.1",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/q92zl65186ayqg0f6vvhzldyi5bhpc70-gnumake-4.4.1-debug",
+        "info": "/nix/store/ygnz9sgg6xbvvn6q4242jq9a4w0hfr57-gnumake-4.4.1-info",
+        "man": "/nix/store/mnzb2cgp3hpvw3i5dn4bccs6ln4cnkpc-gnumake-4.4.1-man",
+        "out": "/nix/store/9ccm93c2lj2kb6m175grf8775w3yzvng-gnumake-4.4.1"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "gnumake",
+      "broken": false,
+      "derivation": "/nix/store/clqgcxxr6iqqzcr4rgyb1dk4sqv0nyyh-gnumake-4.4.1.drv",
+      "description": "Tool to control the generation of non-source files from sources",
+      "install_id": "gnumake",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "gnumake-4.4.1",
+      "pname": "gnumake",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:57:27.941676Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "4.4.1",
+      "outputs_to_install": [
+        "man",
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/8vg51i45l7bqcc2qfcnjgppxlsfzi11h-gnumake-4.4.1-debug",
+        "info": "/nix/store/hs8b0bwzv4q3w8mf4pbq8l7v0vnjj0f9-gnumake-4.4.1-info",
+        "man": "/nix/store/n414mxklk1mxyk9syhbbh6j0d92l4ggi-gnumake-4.4.1-man",
+        "out": "/nix/store/kzf67ka1wa2055bnsdrnqnv59md9xbxa-gnumake-4.4.1"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "python312",
+      "broken": false,
+      "derivation": "/nix/store/4a5dc8rvcxanlh3s5qqf27i7zcvj2hgf-python3-3.12.11.drv",
+      "description": "High-level dynamically-typed programming language",
+      "install_id": "python3",
+      "license": "Python-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "python3-3.12.11",
+      "pname": "python312",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:05:54.132950Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "python3-3.12.11",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/7kf4is0acnfbh8rii15zdf6xc7dlzzwc-python3-3.12.11-debug",
+        "out": "/nix/store/4k1n9qx7di8k7p2fq14phwhw9bzdfzki-python3-3.12.11"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "python312",
+      "broken": false,
+      "derivation": "/nix/store/xd02irsyzhc0fcjbh9wnikfmmvjll154-python3-3.12.11.drv",
+      "description": "High-level dynamically-typed programming language",
+      "install_id": "python3",
+      "license": "Python-2.0",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "python3-3.12.11",
+      "pname": "python312",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:57:58.783246Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "python3-3.12.11",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "debug": "/nix/store/gndignbyvrbrrgk575rcll7d8izkrcq5-python3-3.12.11-debug",
+        "out": "/nix/store/2i76abyx06asxr2k3rgsp8zx647qj38h-python3-3.12.11"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "uv",
+      "broken": false,
+      "derivation": "/nix/store/h31r5jskn5fjad9xffsagc30kb0pxxar-uv-0.8.2.drv",
+      "description": "Extremely fast Python package installer and resolver, written in Rust",
+      "install_id": "uv",
+      "license": "[ Apache-2.0, MIT ]",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "uv-0.8.2",
+      "pname": "uv",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:07:42.514089Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.8.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/bdps6h2gn2rysavc3cq2slqnjlsyyk03-uv-0.8.2"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "uv",
+      "broken": false,
+      "derivation": "/nix/store/yjph3bdnhgzkbnr0a2qhzz3wbspiimpw-uv-0.8.2.drv",
+      "description": "Extremely fast Python package installer and resolver, written in Rust",
+      "install_id": "uv",
+      "license": "[ Apache-2.0, MIT ]",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "uv-0.8.2",
+      "pname": "uv",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:59:43.505055Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "0.8.2",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/swq8qrr7n5gkc1b4940q62a3ll52prgl-uv-0.8.2"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "wget",
+      "broken": false,
+      "derivation": "/nix/store/zbz2rr2f8y7bszmzipwkczv5pdmlwlxx-wget-1.25.0.drv",
+      "description": "Tool for retrieving files using HTTP, HTTPS, and FTP",
+      "install_id": "wget",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "wget-1.25.0",
+      "pname": "wget",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:07:55.053166Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.25.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/0l94vfxr0qn3bsji4302krjja12xppx4-wget-1.25.0"
+      },
+      "system": "aarch64-linux",
+      "group": "toplevel",
+      "priority": 5
+    },
+    {
+      "attr_path": "wget",
+      "broken": false,
+      "derivation": "/nix/store/zaqkqdkrri44c5g5yivml5mfkjkhigy3-wget-1.25.0.drv",
+      "description": "Tool for retrieving files using HTTP, HTTPS, and FTP",
+      "install_id": "wget",
+      "license": "GPL-3.0-or-later",
+      "locked_url": "https://github.com/flox/nixpkgs?rev=20075955deac2583bb12f07151c2df830ef346b4",
+      "name": "wget-1.25.0",
+      "pname": "wget",
+      "rev": "20075955deac2583bb12f07151c2df830ef346b4",
+      "rev_count": 846535,
+      "rev_date": "2025-08-19T15:00:17Z",
+      "scrape_date": "2025-08-24T16:59:55.557995Z",
+      "stabilities": [
+        "unstable"
+      ],
+      "unfree": false,
+      "version": "1.25.0",
+      "outputs_to_install": [
+        "out"
+      ],
+      "outputs": {
+        "out": "/nix/store/8fz5ikjrzwrbbyml685i7qc4blnwcpl4-wget-1.25.0"
+      },
+      "system": "x86_64-linux",
+      "group": "toplevel",
+      "priority": 5
+    }
+  ]
+}
